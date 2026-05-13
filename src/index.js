@@ -1,51 +1,40 @@
 #!/usr/bin/env node
 
+import chalk from "chalk";
+import { Command } from "commander";
 import { execa } from "execa";
 import fs from "fs-extra";
+import ora from "ora";
 import os from "os";
 import path from "path";
-import readline from "readline";
 
-const DEFAULT_REPO =
+const DEFAULT_REPO_URL =
   "https://github.com/navariltd/Frappe-React-UI-Components.git";
-
 const TEMP_DIR = path.join(os.tmpdir(), "frappe-react-ui");
 
-const log = {
-  ok: (msg) => console.log(`✔ ${msg}`),
-  info: (msg) => console.log(`ℹ ${msg}`),
-  warn: (msg) => console.log(`⚠ ${msg}`),
-};
+async function getRemoteDependencies(repoUrl) {
+  const spinner = ora("Fetching remote registry configuration...").start();
+  try {
+    await fs.remove(TEMP_DIR);
+    await execa("git", ["clone", "--depth", "1", repoUrl, TEMP_DIR]);
 
-const ask = (query) =>
-  new Promise((resolve) => {
-    const rl = readline.createInterface({
-      input: process.stdin,
-      output: process.stdout,
-    });
+    const remotePkgPath = path.join(TEMP_DIR, "package.json");
+    if (!(await fs.pathExists(remotePkgPath))) {
+      spinner.fail("Remote package.json not found.");
+      return [];
+    }
 
-    rl.question(query, (ans) => {
-      rl.close();
-      resolve(ans);
-    });
-  });
+    const pkg = await fs.readJson(remotePkgPath);
+    const allDeps = { ...pkg.dependencies, ...pkg.devDependencies };
+    const exclude = ["execa", "fs-extra", "commander", "ora", "chalk"];
 
-async function confirm(msg) {
-  const ans = await ask(`${msg} (y/n): `);
-  return ["y", "yes"].includes((ans || "").trim().toLowerCase());
-}
-
-async function cloneRepo(repo) {
-  log.info("Checking registry...");
-  await fs.remove(TEMP_DIR);
-  await execa("git", ["clone", "--depth", "1", repo, TEMP_DIR]);
-  log.ok("Registry fetched");
-}
-
-async function getRemotePackageJson() {
-  const pkgPath = path.join(TEMP_DIR, "package.json");
-  if (!(await fs.pathExists(pkgPath))) return null;
-  return fs.readJson(pkgPath);
+    spinner.succeed("Registry configuration fetched.");
+    return Object.keys(allDeps).filter((dep) => !exclude.includes(dep));
+  } catch (error) {
+    spinner.fail("Failed to fetch remote dependencies.");
+    console.error(chalk.red(error.message));
+    return [];
+  }
 }
 
 function getInstalledDeps() {
@@ -55,156 +44,121 @@ function getInstalledDeps() {
   return { ...pkg.dependencies, ...pkg.devDependencies };
 }
 
-async function ensureDependencies() {
-  const remote = await getRemotePackageJson();
+async function ensureDependencies(repoUrl) {
+  const required = await getRemoteDependencies(repoUrl);
   const installed = getInstalledDeps();
-
-  const remoteDeps = remote?.dependencies || {};
-  const missing = Object.keys(remoteDeps).filter((d) => !installed?.[d]);
+  const missing = required.filter((d) => !installed?.[d]);
 
   if (missing.length === 0) {
-    log.ok("Dependencies satisfied");
+    console.log(chalk.green("✔ Dependencies already satisfied."));
     return;
   }
 
-  log.warn("Missing dependencies:");
-  missing.forEach((d) => console.log(`  - ${d}`));
+  console.log(chalk.cyan(`\nℹ Found ${missing.length} missing dependencies.`));
 
-  const ok = await confirm("Install missing dependencies?");
-  if (!ok) process.exit(1);
-
-  log.info("Installing dependencies...");
-
-  await execa("npm", ["install", ...missing], {
-    stdio: "inherit",
-  });
-
-  log.ok("Dependencies installed");
-}
-
-async function selectRoot(options) {
-  const cwd = process.cwd();
-
-  if (options?.root) return path.resolve(cwd, options.root);
-
-  const ans = await ask(
-    "Select root (default: ./src, enter '.' for current): ",
-  );
-
-  if (!ans || ans.trim() === "src") {
-    const src = path.join(cwd, "src");
-    if (fs.existsSync(src)) return src;
-    return cwd;
+  const spinner = ora("Installing missing dependencies...").start();
+  try {
+    await execa("npm", ["install", ...missing], { stdio: "ignore" });
+    spinner.succeed("Dependencies installed successfully.");
+  } catch (e) {
+    spinner.fail("Failed to install dependencies automatically.");
+    console.log(
+      chalk.yellow("Try running: "),
+      `npm install ${missing.join(" ")}`,
+    );
+    process.exit(1);
   }
-
-  if (ans.trim() === "." || ans.trim() === "") return cwd;
-
-  return path.resolve(cwd, ans);
 }
 
-async function copyFolder(src, dest, overwrite = false) {
+async function copyFolder(src, dest, label, overwrite) {
   const srcPath = path.join(TEMP_DIR, "src", src);
-  if (!(await fs.pathExists(srcPath))) return [];
+  const installedFiles = [];
+  const skippedFiles = [];
 
-  const created = [];
-  const skipped = [];
+  if (await fs.pathExists(srcPath)) {
+    const files = await fs.readdir(srcPath, { recursive: true });
 
-  const walk = async (dir, base = "") => {
-    const items = await fs.readdir(dir);
+    for (const file of files) {
+      const sourceFile = path.join(srcPath, file);
+      const targetFile = path.join(dest, file);
 
-    for (const item of items) {
-      const full = path.join(dir, item);
-      const rel = path.join(base, item);
-      const stat = await fs.stat(full);
+      if (await fs.lstat(sourceFile).then((s) => s.isDirectory())) continue;
 
-      if (stat.isDirectory()) {
-        await walk(full, rel);
+      const exists = await fs.pathExists(targetFile);
+      if (exists && !overwrite) {
+        skippedFiles.push(path.join("src", src, file));
       } else {
-        const target = path.join(dest, rel);
-
-        if ((await fs.pathExists(target)) && !overwrite) {
-          skipped.push(rel);
-          continue;
-        }
-
-        await fs.ensureDir(path.dirname(target));
-        await fs.copy(full, target, { overwrite: true });
-        created.push(rel);
+        await fs.copy(sourceFile, targetFile, { overwrite: true });
+        installedFiles.push(path.join("src", src, file));
       }
     }
-  };
-
-  await walk(srcPath);
-  return { created, skipped };
-}
-
-async function installAll(repo, root, overwrite) {
-  await cloneRepo(repo);
-
-  const components = await copyFolder(
-    "components",
-    path.join(root, "components"),
-    overwrite,
-  );
-
-  const lib = await copyFolder("lib", path.join(root, "lib"), overwrite);
-  const hooks = await copyFolder("hooks", path.join(root, "hooks"), overwrite);
-
-  await fs.remove(TEMP_DIR);
-
-  return {
-    created: [...components.created, ...lib.created, ...hooks.created],
-    skipped: [...components.skipped, ...lib.skipped, ...hooks.skipped],
-  };
-}
-
-function printSummary(result) {
-  log.ok(`Created ${result.created.length} files:`);
-
-  result.created.forEach((f) => console.log(`  - ${f}`));
-
-  if (result.skipped.length) {
-    log.info(`Skipped ${result.skipped.length} files:`);
-    result.skipped.forEach((f) => console.log(`  - ${f}`));
+    return { installedFiles, skippedFiles };
   }
+  return { installedFiles: [], skippedFiles: [] };
 }
 
 async function main() {
-  const { Command } = await import("commander");
   const program = new Command();
 
   program
     .name("frappe-react-ui")
-    .description("Shadcn-style CLI for Frappe React UI")
-    .version("1.0.0");
+    .description("CLI for installing Frappe React UI components")
+    .version("1.1.0");
 
   program
     .command("add")
-    .option("--all")
-    .option("--root <path>")
-    .option("--repo <url>")
-    .option("--overwrite")
+    .option("--all", "Install all components")
+    .option("--root <path>", "Project root directory", "src")
+    .option("--repo <url>", "Registry repository URL", DEFAULT_REPO_URL)
+    .option("--overwrite", "Overwrite existing files", false)
     .action(async (options) => {
-      const repo = options.repo || DEFAULT_REPO;
+      console.log(chalk.bold("\nFrappe UI Component Installer"));
+      console.log(chalk.dim("-------------------------------"));
 
-      const root = await selectRoot(options);
+      await ensureDependencies(options.repo);
 
-      await ensureDependencies();
+      const projectRoot = path.resolve(process.cwd(), options.root);
+      const spinner = ora(chalk.cyan("Installing components...")).start();
 
-      const ok = await confirm("Proceed with installing Frappe React UI?");
-      if (!ok) {
-        log.warn("Cancelled");
-        return;
+      const results = { installed: [], skipped: [] };
+
+      const folders = [
+        { src: "components", dest: "components", label: "Components" },
+        { src: "lib", dest: "lib", label: "Lib Utils" },
+        { src: "hooks", dest: "hooks", label: "Hooks" },
+      ];
+
+      for (const folder of folders) {
+        const { installedFiles, skippedFiles } = await copyFolder(
+          folder.src,
+          path.join(projectRoot, folder.dest),
+          folder.label,
+          options.overwrite,
+        );
+        results.installed.push(...installedFiles);
+        results.skipped.push(...skippedFiles);
       }
 
-      if (!options.all) {
-        log.warn("Use --all to install full registry");
-        return;
+      spinner.stop();
+
+      if (results.installed.length > 0) {
+        console.log(
+          chalk.green(`✔ Created ${results.installed.length} files:`),
+        );
+        results.installed.forEach((f) => console.log(chalk.dim(`  - ${f}`)));
       }
 
-      const result = await installAll(repo, root, options.overwrite);
+      if (results.skipped.length > 0) {
+        console.log(
+          chalk.yellow(
+            `\nℹ Skipped ${results.skipped.length} files: (Use --overwrite to force)`,
+          ),
+        );
+        results.skipped.forEach((f) => console.log(chalk.dim(`  - ${f}`)));
+      }
 
-      printSummary(result);
+      await fs.remove(TEMP_DIR);
+      console.log(chalk.bold.green("\nDone!"));
     });
 
   program.parse();
