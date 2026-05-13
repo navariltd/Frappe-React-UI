@@ -7,10 +7,24 @@ import fs from "fs-extra";
 import ora from "ora";
 import os from "os";
 import path from "path";
+import readline from "readline";
 
 const DEFAULT_REPO_URL =
   "https://github.com/navariltd/Frappe-React-UI-Components.git";
 const TEMP_DIR = path.join(os.tmpdir(), "frappe-react-ui");
+
+function askQuestion(query) {
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+  return new Promise((resolve) =>
+    rl.question(query, (ans) => {
+      rl.close();
+      resolve(ans);
+    }),
+  );
+}
 
 async function getRemoteDependencies(repoUrl) {
   const spinner = ora("Fetching remote registry configuration...").start();
@@ -109,13 +123,21 @@ async function main() {
     .command("add")
     .option("--all", "Install all components")
     .option("--root <path>", "Project root directory", "src")
-    .option("--repo <url>", "Registry repository URL", DEFAULT_REPO_URL)
+    .option("--repo <url>", "Registry repository URL")
     .option("--overwrite", "Overwrite existing files", false)
     .action(async (options) => {
       console.log(chalk.bold("\nFrappe UI Component Installer"));
       console.log(chalk.dim("-------------------------------"));
 
-      await ensureDependencies(options.repo);
+      let repoUrl = options.repo;
+      if (!repoUrl) {
+        const input = await askQuestion(
+          `${chalk.cyan("Enter registry URL")} ${chalk.dim(`(default: ${DEFAULT_REPO_URL})`)}: `,
+        );
+        repoUrl = input.trim() || DEFAULT_REPO_URL;
+      }
+
+      await ensureDependencies(repoUrl);
 
       const projectRoot = path.resolve(process.cwd(), options.root);
       const spinner = ora(chalk.cyan("Installing components...")).start();
