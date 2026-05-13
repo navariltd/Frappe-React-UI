@@ -1,0 +1,52 @@
+{
+  "name": "frappe-react-ui",
+  "version": "1.0.0",
+  "description": "A shadcn-inspired CLI for adding customizable React UI components directly into Frappe projects.",
+  "keywords": [
+    "frappe",
+    "frappe-ui",
+    "frappe-react",
+    "ui",
+    "react",
+    "cli",
+    "components",
+    "shadcn"
+  ],
+  "homepage": "https://github.com/navariltd/Frappe-React-UI#readme",
+  "bugs": {
+    "url": "https://github.com/navariltd/Frappe-React-UI/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/navariltd/Frappe-React-UI.git"
+  },
+  "license": "MIT",
+  "author": "Navari Ltd",
+  "type": "module",
+  "bin": {
+    "frappe-react-ui": "./dist/index.js"
+  },
+  "main": "./dist/index.js",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "node src/index.js",
+    "prepare": "npm run build",
+    "test": "echo \"No tests yet\" && exit 0"
+  },
+  "dependencies": {
+    "commander": "^12.1.0",
+    "execa": "^9.6.1",
+    "fs-extra": "^11.3.5",
+    "ora": "^8.0.0"
+  },
+  "devDependencies": {
+    "tsup": "^8.5.1",
+    "typescript": "^6.0.3"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
