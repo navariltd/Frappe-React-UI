@@ -1,6 +1,6 @@
 {
   "name": "frappe-react-ui",
-  "version": "1.0.0",
+  "version": "2.0.1",
   "description": "A shadcn-inspired CLI for adding customizable React UI components directly into Frappe projects.",
   "keywords": [
     "frappe",
@@ -23,10 +23,10 @@
   "license": "MIT",
   "author": "Navari Ltd",
   "type": "module",
+  "main": "dist/index.js",
   "bin": {
     "frappe-react-ui": "./dist/index.js"
   },
-  "main": "./dist/index.js",
   "files": [
     "dist"
   ],
