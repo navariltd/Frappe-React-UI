@@ -11,7 +11,9 @@ import readline from "readline";
 
 const DEFAULT_REPO_URL =
   "https://github.com/navariltd/Frappe-React-UI-Components.git";
+const DEFAULT_FOLDERS = ["components", "hooks", "lib", "types"];
 const TEMP_DIR = path.join(os.tmpdir(), "frappe-react-ui");
+const CONFIG_FILE = path.join(process.cwd(), "frappe-ui.config.json");
 
 function askQuestion(query) {
   const rl = readline.createInterface({
@@ -26,29 +28,64 @@ function askQuestion(query) {
   );
 }
 
-async function getRemoteDependencies(repoUrl) {
-  const spinner = ora("Fetching remote registry configuration...").start();
+async function loadConfig(options) {
+  let config = {
+    repoUrl: DEFAULT_REPO_URL,
+    root: "src",
+    syncFolders: DEFAULT_FOLDERS,
+  };
+  const configExists = await fs.pathExists(CONFIG_FILE);
+
+  if (configExists) {
+    config = await fs.readJson(CONFIG_FILE);
+    if (!config.syncFolders) {
+      config.syncFolders = DEFAULT_FOLDERS;
+    }
+  } else {
+    console.log(chalk.bold("\nFirst-time Setup: No configuration file found."));
+
+    const inputUrl = await askQuestion(
+      `${chalk.cyan("Enter registry URL")} ${chalk.dim(`(default: ${config.repoUrl})`)}: `,
+    );
+    config.repoUrl = inputUrl.trim() || config.repoUrl;
+
+    const inputRoot = await askQuestion(
+      `${chalk.cyan("Enter project root folder")} ${chalk.dim(`(default: ${config.root})`)}: `,
+    );
+    config.root = inputRoot.trim() || config.root;
+
+    await fs.writeJson(CONFIG_FILE, config, { spaces: 2 });
+    console.log(chalk.green(`\n✔ Configuration saved to ${CONFIG_FILE}\n`));
+  }
+
+  if (options.repo) config.repoUrl = options.repo;
+  if (options.root) config.root = options.root;
+
+  return config;
+}
+
+async function cloneRemoteRegistry(repoUrl) {
+  const spinner = ora("Fetching remote registry...").start();
   try {
     await fs.remove(TEMP_DIR);
     await execa("git", ["clone", "--depth", "1", repoUrl, TEMP_DIR]);
-
-    const remotePkgPath = path.join(TEMP_DIR, "package.json");
-    if (!(await fs.pathExists(remotePkgPath))) {
-      spinner.fail("Remote package.json not found.");
-      return [];
-    }
-
-    const pkg = await fs.readJson(remotePkgPath);
-    const allDeps = { ...pkg.dependencies, ...pkg.devDependencies };
-    const exclude = ["execa", "fs-extra", "commander", "ora", "chalk"];
-
-    spinner.succeed("Registry configuration fetched.");
-    return Object.keys(allDeps).filter((dep) => !exclude.includes(dep));
+    spinner.succeed("Remote registry fetched.");
   } catch (error) {
-    spinner.fail("Failed to fetch remote dependencies.");
+    spinner.fail("Failed to fetch remote registry.");
     console.error(chalk.red(error.message));
-    return [];
+    process.exit(1);
   }
+}
+
+async function getRemoteDependencies() {
+  const remotePkgPath = path.join(TEMP_DIR, "package.json");
+  if (!(await fs.pathExists(remotePkgPath))) return [];
+
+  const pkg = await fs.readJson(remotePkgPath);
+  const allDeps = { ...pkg.dependencies, ...pkg.devDependencies };
+  const exclude = ["execa", "fs-extra", "commander", "ora", "chalk"];
+
+  return Object.keys(allDeps).filter((dep) => !exclude.includes(dep));
 }
 
 function getInstalledDeps() {
@@ -58,18 +95,18 @@ function getInstalledDeps() {
   return { ...pkg.dependencies, ...pkg.devDependencies };
 }
 
-async function ensureDependencies(repoUrl) {
-  const required = await getRemoteDependencies(repoUrl);
+async function ensureDependencies() {
+  const required = await getRemoteDependencies();
   const installed = getInstalledDeps();
   const missing = required.filter((d) => !installed?.[d]);
 
-  if (missing.length === 0) {
-    console.log(chalk.green("✔ Dependencies already satisfied."));
-    return;
-  }
+  if (missing.length === 0) return;
 
-  console.log(chalk.cyan(`\nℹ Found ${missing.length} missing dependencies.`));
-
+  console.log(
+    chalk.cyan(
+      `\nℹ Found ${missing.length} missing dependencies required by components.`,
+    ),
+  );
   const spinner = ora("Installing missing dependencies...").start();
   try {
     await execa("npm", ["install", ...missing], { stdio: "ignore" });
@@ -84,31 +121,78 @@ async function ensureDependencies(repoUrl) {
   }
 }
 
-async function copyFolder(src, dest, label, overwrite) {
-  const srcPath = path.join(TEMP_DIR, "src", src);
-  const installedFiles = [];
-  const skippedFiles = [];
+async function scanRemoteFiles(syncFolders) {
+  const fileList = [];
 
-  if (await fs.pathExists(srcPath)) {
-    const files = await fs.readdir(srcPath, { recursive: true });
+  for (const folder of syncFolders) {
+    const remoteSrcFolder = path.join(TEMP_DIR, "src", folder);
+    if (!(await fs.pathExists(remoteSrcFolder))) continue;
 
-    for (const file of files) {
-      const sourceFile = path.join(srcPath, file);
-      const targetFile = path.join(dest, file);
-
-      if (await fs.lstat(sourceFile).then((s) => s.isDirectory())) continue;
-
-      const exists = await fs.pathExists(targetFile);
-      if (exists && !overwrite) {
-        skippedFiles.push(path.join("src", src, file));
-      } else {
-        await fs.copy(sourceFile, targetFile, { overwrite: true });
-        installedFiles.push(path.join("src", src, file));
+    const items = await fs.readdir(remoteSrcFolder, { recursive: true });
+    for (const item of items) {
+      const fullPath = path.join(remoteSrcFolder, item);
+      const stat = await fs.lstat(fullPath);
+      if (!stat.isDirectory()) {
+        fileList.push(path.join(folder, item));
       }
     }
-    return { installedFiles, skippedFiles };
   }
-  return { installedFiles: [], skippedFiles: [] };
+
+  return fileList;
+}
+
+async function processComponents(
+  components,
+  projectRoot,
+  syncFolders,
+  overwrite,
+) {
+  const remoteFiles = await scanRemoteFiles(syncFolders);
+  const results = { installed: [], skipped: [] };
+
+  const cleanString = (str) => str.toLowerCase().replace(/[-_]/g, "");
+  const normalizedComponents = components.map((c) => cleanString(c));
+
+  const matches = remoteFiles.filter((file) => {
+    if (components.length === 0) return true;
+
+    const segments = file.split(path.sep);
+    const fileNameWithExt = segments[segments.length - 1];
+    const fileNameWithoutExt = path.parse(fileNameWithExt).name;
+
+    const cleanSegments = segments.map((s) => cleanString(s));
+    const cleanFileName = cleanString(fileNameWithoutExt);
+
+    return normalizedComponents.some((comp) => {
+      return cleanFileName === comp || cleanSegments.includes(comp);
+    });
+  });
+
+  if (matches.length === 0 && components.length > 0) {
+    console.log(
+      chalk.yellow(
+        `\n⚠ No components found matching: ${components.join(", ")}`,
+      ),
+    );
+    return results;
+  }
+
+  for (const file of matches) {
+    const sourceFile = path.join(TEMP_DIR, "src", file);
+    const targetFile = path.join(projectRoot, file);
+
+    await fs.ensureDir(path.dirname(targetFile));
+    const exists = await fs.pathExists(targetFile);
+
+    if (exists && !overwrite) {
+      results.skipped.push(file);
+    } else {
+      await fs.copy(sourceFile, targetFile, { overwrite: true });
+      results.installed.push(file);
+    }
+  }
+
+  return results;
 }
 
 async function main() {
@@ -116,56 +200,53 @@ async function main() {
 
   program
     .name("frappe-react-ui")
-    .description("CLI for installing Frappe React UI components")
-    .version("1.1.0");
+    .description(
+      "CLI for adding, searching, and syncing Frappe React UI components",
+    )
+    .version("2.1.0");
 
   program
     .command("add")
-    .option("--all", "Install all components")
-    .option("--root <path>", "Project root directory", "src")
-    .option("--repo <url>", "Registry repository URL")
-    .option("--overwrite", "Overwrite existing files", false)
-    .action(async (options) => {
+    .description("Add components from the registry into your project")
+    .argument(
+      "[components...]",
+      "Specific components to add (leave blank or use --all for all)",
+    )
+    .option(
+      "--all",
+      "Install all components from the target synced registry folders",
+    )
+    .option("--root <path>", "Project root directory override")
+    .option("--repo <url>", "Registry repository URL override")
+    .option("--overwrite", "Overwrite existing files directly", false)
+    .action(async (components, options) => {
       console.log(chalk.bold("\nFrappe UI Component Installer"));
       console.log(chalk.dim("-------------------------------"));
 
-      let repoUrl = options.repo;
-      if (!repoUrl) {
-        const input = await askQuestion(
-          `${chalk.cyan("Enter registry URL")} ${chalk.dim(`(default: ${DEFAULT_REPO_URL})`)}: `,
-        );
-        repoUrl = input.trim() || DEFAULT_REPO_URL;
+      if (options.all) {
+        components = [];
       }
 
-      await ensureDependencies(repoUrl);
+      const config = await loadConfig(options);
+      await cloneRemoteRegistry(config.repoUrl);
+      await ensureDependencies();
 
-      const projectRoot = path.resolve(process.cwd(), options.root);
-      const spinner = ora(chalk.cyan("Installing components...")).start();
+      const projectRoot = path.resolve(process.cwd(), config.root);
+      const spinner = ora(chalk.cyan("Processing component sync...")).start();
 
-      const results = { installed: [], skipped: [] };
-
-      const folders = [
-        { src: "components", dest: "components", label: "Components" },
-        { src: "lib", dest: "lib", label: "Lib Utils" },
-        { src: "hooks", dest: "hooks", label: "Hooks" },
-      ];
-
-      for (const folder of folders) {
-        const { installedFiles, skippedFiles } = await copyFolder(
-          folder.src,
-          path.join(projectRoot, folder.dest),
-          folder.label,
-          options.overwrite,
-        );
-        results.installed.push(...installedFiles);
-        results.skipped.push(...skippedFiles);
-      }
-
+      const results = await processComponents(
+        components,
+        projectRoot,
+        config.syncFolders,
+        options.overwrite,
+      );
       spinner.stop();
 
       if (results.installed.length > 0) {
         console.log(
-          chalk.green(`✔ Created ${results.installed.length} files:`),
+          chalk.green(
+            `\n✔ Synced ${results.installed.length} files into ${config.root}/:`,
+          ),
         );
         results.installed.forEach((f) => console.log(chalk.dim(`  - ${f}`)));
       }
@@ -173,14 +254,97 @@ async function main() {
       if (results.skipped.length > 0) {
         console.log(
           chalk.yellow(
-            `\nℹ Skipped ${results.skipped.length} files: (Use --overwrite to force)`,
+            `\nℹ Skipped ${results.skipped.length} files (Files exist. Use --overwrite or 'sync' command to force):`,
           ),
         );
         results.skipped.forEach((f) => console.log(chalk.dim(`  - ${f}`)));
       }
 
       await fs.remove(TEMP_DIR);
-      console.log(chalk.bold.green("\nDone!"));
+      console.log(chalk.bold.green("\nProcess complete!"));
+    });
+
+  program
+    .command("sync")
+    .description(
+      "Sync and force overwrite existing components from the registry",
+    )
+    .argument(
+      "[components...]",
+      "Specific components to sync (leave blank or use --all for all)",
+    )
+    .option(
+      "--all",
+      "Sync and overwrite all components from the target synced registry folders",
+    )
+    .option("--root <path>", "Project root directory override")
+    .option("--repo <url>", "Registry repository URL override")
+    .action(async (components, options) => {
+      console.log(chalk.bold("\nFrappe UI Component Synchronizer"));
+      console.log(chalk.dim("-------------------------------"));
+
+      if (options.all) {
+        components = [];
+      }
+
+      const config = await loadConfig(options);
+      await cloneRemoteRegistry(config.repoUrl);
+      await ensureDependencies();
+
+      const projectRoot = path.resolve(process.cwd(), config.root);
+      const spinner = ora(chalk.cyan("Syncing items...")).start();
+
+      const results = await processComponents(
+        components,
+        projectRoot,
+        config.syncFolders,
+        true,
+      );
+      spinner.stop();
+
+      if (results.installed.length > 0) {
+        console.log(
+          chalk.green(
+            `\n✔ Successfully updated ${results.installed.length} files:`,
+          ),
+        );
+        results.installed.forEach((f) => console.log(chalk.dim(`  - ${f}`)));
+      }
+
+      await fs.remove(TEMP_DIR);
+      console.log(chalk.bold.green("\nSync complete!"));
+    });
+
+  program
+    .command("search")
+    .description(
+      "Search files or directories available in the tracked remote registry folders",
+    )
+    .argument("<query>", "Search keyword matching folders or file properties")
+    .option("--repo <url>", "Registry repository URL override")
+    .action(async (query, options) => {
+      const config = await loadConfig(options);
+      await cloneRemoteRegistry(config.repoUrl);
+
+      const remoteFiles = await scanRemoteFiles(config.syncFolders);
+      const filtered = remoteFiles.filter((f) =>
+        f.toLowerCase().includes(query.toLowerCase()),
+      );
+
+      console.log(chalk.bold(`\nSearch Results for: "${query}"`));
+      console.log(chalk.dim("-------------------------------"));
+
+      if (filtered.length === 0) {
+        console.log(
+          chalk.yellow(
+            "No components found matching that criteria inside tracked folders.",
+          ),
+        );
+      } else {
+        filtered.forEach((f) => console.log(chalk.cyan(`  → ${f}`)));
+      }
+
+      await fs.remove(TEMP_DIR);
     });
 
   program.parse();
