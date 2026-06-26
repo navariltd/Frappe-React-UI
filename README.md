@@ -79,7 +79,7 @@ When triggered for the first time, a `frappe-ui.config.json` configuration manif
 
 ```json
 {
-  "repoUrl": "[https://github.com/navariltd/Frappe-React-UI-Components.git](https://github.com/navariltd/Frappe-React-UI-Components.git)",
+  "repoUrl": "[https://github.com/navariltd/frappe_react_ui_components.git](https://github.com/navariltd/frappe_react_ui_components.git)",
   "root": "src",
   "syncFolders": ["components", "hooks", "lib", "types"]
 }
