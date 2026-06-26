@@ -1,6 +1,6 @@
 {
   "name": "frappe-react-ui",
-  "version": "2.0.1",
+  "version": "2.0.2",
   "description": "A shadcn-inspired CLI for adding customizable React UI components directly into Frappe projects.",
   "keywords": [
     "frappe",

@@ -10,7 +10,7 @@ import path from "path";
 import readline from "readline";
 
 const DEFAULT_REPO_URL =
-  "https://github.com/navariltd/Frappe-React-UI-Components.git";
+  "https://github.com/navariltd/frappe_react_ui_components.git";
 const DEFAULT_FOLDERS = ["components", "hooks", "lib", "types"];
 const TEMP_DIR = path.join(os.tmpdir(), "frappe-react-ui");
 const CONFIG_FILE = path.join(process.cwd(), "frappe-ui.config.json");
@@ -31,6 +31,7 @@ function askQuestion(query) {
 async function loadConfig(options) {
   let config = {
     repoUrl: DEFAULT_REPO_URL,
+    remoteDir: "react-ui",
     root: "src",
     syncFolders: DEFAULT_FOLDERS,
   };
@@ -41,6 +42,9 @@ async function loadConfig(options) {
     if (!config.syncFolders) {
       config.syncFolders = DEFAULT_FOLDERS;
     }
+    if (config.remoteDir === undefined) {
+      config.remoteDir = "react-ui";
+    }
   } else {
     console.log(chalk.bold("\nFirst-time Setup: No configuration file found."));
 
@@ -49,8 +53,14 @@ async function loadConfig(options) {
     );
     config.repoUrl = inputUrl.trim() || config.repoUrl;
 
+    const inputRemoteDir = await askQuestion(
+      `${chalk.cyan("Enter remote subfolder containing package.json/src (leave empty for repo root)")} ${chalk.dim(`(default: ${config.remoteDir})`)}: `,
+    );
+    config.remoteDir =
+      inputRemoteDir.trim() !== "" ? inputRemoteDir.trim() : config.remoteDir;
+
     const inputRoot = await askQuestion(
-      `${chalk.cyan("Enter project root folder")} ${chalk.dim(`(default: ${config.root})`)}: `,
+      `${chalk.cyan("Enter local project root folder")} ${chalk.dim(`(default: ${config.root})`)}: `,
     );
     config.root = inputRoot.trim() || config.root;
 
@@ -59,6 +69,7 @@ async function loadConfig(options) {
   }
 
   if (options.repo) config.repoUrl = options.repo;
+  if (options.remoteDir !== undefined) config.remoteDir = options.remoteDir;
   if (options.root) config.root = options.root;
 
   return config;
@@ -77,8 +88,8 @@ async function cloneRemoteRegistry(repoUrl) {
   }
 }
 
-async function getRemoteDependencies() {
-  const remotePkgPath = path.join(TEMP_DIR, "package.json");
+async function getRemoteDependencies(remoteDir) {
+  const remotePkgPath = path.join(TEMP_DIR, remoteDir, "package.json");
   if (!(await fs.pathExists(remotePkgPath))) return [];
 
   const pkg = await fs.readJson(remotePkgPath);
@@ -95,8 +106,8 @@ function getInstalledDeps() {
   return { ...pkg.dependencies, ...pkg.devDependencies };
 }
 
-async function ensureDependencies() {
-  const required = await getRemoteDependencies();
+async function ensureDependencies(remoteDir) {
+  const required = await getRemoteDependencies(remoteDir);
   const installed = getInstalledDeps();
   const missing = required.filter((d) => !installed?.[d]);
 
@@ -109,23 +120,30 @@ async function ensureDependencies() {
   );
   const spinner = ora("Installing missing dependencies...").start();
   try {
-    await execa("npm", ["install", ...missing], { stdio: "ignore" });
+    await execa("npm", ["install", ...missing, "--legacy-peer-deps"], {
+      stdio: "ignore",
+    });
     spinner.succeed("Dependencies installed successfully.");
   } catch (e) {
     spinner.fail("Failed to install dependencies automatically.");
     console.log(
       chalk.yellow("Try running: "),
-      `npm install ${missing.join(" ")}`,
+      `npm install ${missing.join(" ")} --legacy-peer-deps`,
     );
     process.exit(1);
   }
 }
 
-async function scanRemoteFiles(syncFolders) {
+function getRemoteSrcPath(remoteDir) {
+  return path.join(TEMP_DIR, remoteDir, "src");
+}
+
+async function scanRemoteFiles(syncFolders, remoteDir) {
   const fileList = [];
+  const baseSrcFolder = getRemoteSrcPath(remoteDir);
 
   for (const folder of syncFolders) {
-    const remoteSrcFolder = path.join(TEMP_DIR, "src", folder);
+    const remoteSrcFolder = path.join(baseSrcFolder, folder);
     if (!(await fs.pathExists(remoteSrcFolder))) continue;
 
     const items = await fs.readdir(remoteSrcFolder, { recursive: true });
@@ -146,9 +164,11 @@ async function processComponents(
   projectRoot,
   syncFolders,
   overwrite,
+  remoteDir,
 ) {
-  const remoteFiles = await scanRemoteFiles(syncFolders);
+  const remoteFiles = await scanRemoteFiles(syncFolders, remoteDir);
   const results = { installed: [], skipped: [] };
+  const baseSrcFolder = getRemoteSrcPath(remoteDir);
 
   const cleanString = (str) => str.toLowerCase().replace(/[-_]/g, "");
   const normalizedComponents = components.map((c) => cleanString(c));
@@ -178,7 +198,7 @@ async function processComponents(
   }
 
   for (const file of matches) {
-    const sourceFile = path.join(TEMP_DIR, "src", file);
+    const sourceFile = path.join(baseSrcFolder, file);
     const targetFile = path.join(projectRoot, file);
 
     await fs.ensureDir(path.dirname(targetFile));
@@ -203,7 +223,7 @@ async function main() {
     .description(
       "CLI for adding, searching, and syncing Frappe React UI components",
     )
-    .version("2.1.0");
+    .version("2.2.1");
 
   program
     .command("add")
@@ -218,6 +238,10 @@ async function main() {
     )
     .option("--root <path>", "Project root directory override")
     .option("--repo <url>", "Registry repository URL override")
+    .option(
+      "--remote-dir <path>",
+      "Remote subdirectory override containing package.json/src",
+    )
     .option("--overwrite", "Overwrite existing files directly", false)
     .action(async (components, options) => {
       console.log(chalk.bold("\nFrappe UI Component Installer"));
@@ -229,7 +253,7 @@ async function main() {
 
       const config = await loadConfig(options);
       await cloneRemoteRegistry(config.repoUrl);
-      await ensureDependencies();
+      await ensureDependencies(config.remoteDir);
 
       const projectRoot = path.resolve(process.cwd(), config.root);
       const spinner = ora(chalk.cyan("Processing component sync...")).start();
@@ -239,6 +263,7 @@ async function main() {
         projectRoot,
         config.syncFolders,
         options.overwrite,
+        config.remoteDir,
       );
       spinner.stop();
 
@@ -279,6 +304,10 @@ async function main() {
     )
     .option("--root <path>", "Project root directory override")
     .option("--repo <url>", "Registry repository URL override")
+    .option(
+      "--remote-dir <path>",
+      "Remote subdirectory override containing package.json/src",
+    )
     .action(async (components, options) => {
       console.log(chalk.bold("\nFrappe UI Component Synchronizer"));
       console.log(chalk.dim("-------------------------------"));
@@ -289,7 +318,7 @@ async function main() {
 
       const config = await loadConfig(options);
       await cloneRemoteRegistry(config.repoUrl);
-      await ensureDependencies();
+      await ensureDependencies(config.remoteDir);
 
       const projectRoot = path.resolve(process.cwd(), config.root);
       const spinner = ora(chalk.cyan("Syncing items...")).start();
@@ -299,6 +328,7 @@ async function main() {
         projectRoot,
         config.syncFolders,
         true,
+        config.remoteDir,
       );
       spinner.stop();
 
@@ -322,11 +352,18 @@ async function main() {
     )
     .argument("<query>", "Search keyword matching folders or file properties")
     .option("--repo <url>", "Registry repository URL override")
+    .option(
+      "--remote-dir <path>",
+      "Remote subdirectory override containing package.json/src",
+    )
     .action(async (query, options) => {
       const config = await loadConfig(options);
       await cloneRemoteRegistry(config.repoUrl);
 
-      const remoteFiles = await scanRemoteFiles(config.syncFolders);
+      const remoteFiles = await scanRemoteFiles(
+        config.syncFolders,
+        config.remoteDir,
+      );
       const filtered = remoteFiles.filter((f) =>
         f.toLowerCase().includes(query.toLowerCase()),
       );
